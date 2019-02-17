@@ -1,46 +1,52 @@
 /*
- * ESP8266 Web server with Web Socket to control an LED.
  *
- * The web server keeps all clients' LED status up to date and any client may
- * turn the LED on or off.
  *
- * For example, clientA connects and turns the LED on. This changes the word
- * "LED" on the web page to the color red. When clientB connects, the word
- * "LED" will be red since the server knows the LED is on.  When clientB turns
- * the LED off, the word LED changes color to black on clientA and clientB web
- * pages.
  *
- * References:
  *
- * https://github.com/Links2004/arduinoWebSockets
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
  *
  */
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiMulti.h>
 #include <WebSocketsServer.h>
 #include <Hash.h>
 #include <WebServer.h>
-#include <ESPmDNS.h>
 #include <Servo.h>
+#include <ESPmDNS.h>
+#include <iostream>
+#include <string>
 
-#include "WifiCredentials.h"
-#include "webpage.h" //Our HTML webpage contents
 
-MDNSResponder mdns;
+#include "webpage.h" //Our HTML webpage file
 
+//references to the two different types of connection
+extern void setupWifi();
+extern void setupHotspot();
+
+//LED setup
 static void writeLED(bool);
 static void writewifiLED(bool);
 
+//servo set up
 static Servo servoX, servoY;
-static const int servoPinX = GPIO_NUM_13;
-static const int servoPinY = GPIO_NUM_14;
+static const int servoPinX = GPIO_NUM_12;
+static const int servoPinY = GPIO_NUM_27;
 
-WiFiMulti wifi;
+//DNS server
+MDNSResponder mdns;
+
+//sets up the websocket
 WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 
-// Internal LED pin for LOLIN32
+// sets LED pin
 const int LEDPIN = GPIO_NUM_25;
 // Internal LED pin for connection to wifi
 const int WIFILEDPIN = GPIO_NUM_21;
@@ -50,6 +56,7 @@ bool LEDStatus;
 // Commands sent through Web Socket
 const char LEDON[] = "ledon";
 const char LEDOFF[] = "ledoff";
+
 
 String getValue(String data, char separator, int index)
 {
@@ -67,30 +74,34 @@ String getValue(String data, char separator, int index)
     return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
 
+// Received data of format x,y [-100,+100]  e.g. -100,80
 bool positionUpdateHandler(const char *data)
-// Received data of format x,y e.g. -100,80
 {
-  {
-    String field;
+  if (!data)
+    return false;
 
-    field = getValue(data, ',', 0);
-    if (field == "") return false;
-    int xpos = field.toInt();
+  String field;
 
-    field = getValue(data, ',', 1);
-    if (field == "") return false;
-    int ypos = field.toInt();
+  field = getValue(data, ',', 0);
+  if (field == "") return false;
+  int xpos = field.toInt();
+  xpos = max(-100,min(xpos,100));
 
-    int X = 90 - (90*xpos)/100;
-    int Y = 90 - (90*ypos)/100;
+  field = getValue(data, ',', 1);
+  if (field == "") return false;
+  int ypos = field.toInt();
+  ypos = max(-100,min(ypos,100));
 
-    servoX.write(X);
-    servoY.write(Y);
-    return true;
-  }
+  int X = 90 - (90*xpos)/100;
+  int Y = 90 - (90*ypos)/100;
 
-  return false;
+  Serial.printf("Servos=%d,%d\r\n",X,Y);
+
+  servoX.write(X);
+  servoY.write(Y);
+  return true;
 }
+
 
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length)
 {
@@ -103,6 +114,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       {
         IPAddress ip = webSocket.remoteIP(num);
         Serial.printf("[%u] Connected from %d.%d.%d.%d url: %s\r\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+
         // Send the current LED status
         if (LEDStatus) {
           webSocket.sendTXT(num, LEDON, strlen(LEDON));
@@ -127,12 +139,12 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       else {
         Serial.println("Unknown command");
       }
+
       // send data to all connected clients
       webSocket.broadcastTXT(payload, length);
       break;
     case WStype_BIN:
       Serial.printf("[%u] get binary length: %u\r\n", num, length);
-      //hexdump(payload, length);
 
       // echo data back to browser
       webSocket.sendBIN(num, payload, length);
@@ -143,10 +155,12 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
   }
 }
 
+
 void handleRoot()
 {
   server.send_P(200, "text/html", INDEX_HTML);
 }
+
 
 void handleNotFound()
 {
@@ -164,9 +178,9 @@ void handleNotFound()
   server.send(404, "text/plain", message);
 }
 
+// wifi connected LED
 static void writewifiLED(bool LEDon)
 {
-  // Note inverted logic for Adafruit HUZZAH board
   if (LEDon) {
     digitalWrite(WIFILEDPIN, 1);
   }
@@ -175,10 +189,10 @@ static void writewifiLED(bool LEDon)
   }
 }
 
+//on/off LED
 static void writeLED(bool LEDon)
 {
   LEDStatus = LEDon;
-  // Note inverted logic for Adafruit HUZZAH board
   if (LEDon) {
     digitalWrite(LEDPIN, 0);
   }
@@ -187,42 +201,53 @@ static void writeLED(bool LEDon)
   }
 }
 
+
 void setup()
 {
+  // Initialise LEDStatus
   pinMode(LEDPIN, OUTPUT);
   writeLED(false);
 
   pinMode(WIFILEDPIN, OUTPUT);
   writewifiLED(false);
 
-  servoX.attach(servoPinX);
-  servoY.attach(servoPinY);
+  // Initialise Servos
+  const int servoPulseMin(1000), servoPulseMax(2000);
+  servoX.attach(servoPinX, servoPulseMin, servoPulseMax);
+  servoY.attach(servoPinY, servoPulseMin, servoPulseMax);
   servoX.write(90);
   servoY.write(90);
 
+  // Start serial port
   Serial.begin(921600);
   Serial.println();
   Serial.println();
-  for(uint8_t t = 4; t > 0; t--) {
+  for(uint8_t t = 4; t > 0; t--)
+  {
     Serial.printf("[SETUP] BOOT WAIT %d...\r\n", t);
     Serial.flush();
     delay(1000);
-  };
-
-  wifi.addAP(wifiSSID, wifiPassword);
-  while(wifi.run() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(100);
   }
 
-  Serial.println("");
-  Serial.print("Connected to ");
-  Serial.println(wifiSSID);
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  // set up type of connection
+  int toggle = 22;
+  pinMode (toggle, INPUT_PULLUP);
+    if (digitalRead(toggle) == HIGH)
+      setupWifi();
+    else
+      setupHotspot();
 
-   writewifiLED(true);
+  /*int i;
+    Serial.println("Do you have WiFi? (y/n) ");
+    i = Serial.read();
+    if (i=='y')
+    setupWifi();
+    else if (i=='n')
+      setupHotspot();
+  */
+  writewifiLED(true);
 
+  // Initialise server
   if (mdns.begin("espWebSock")) {
     Serial.println("MDNS responder started");
     mdns.addService("http", "tcp", 80);
@@ -231,17 +256,16 @@ void setup()
   else {
     Serial.println("MDNS.begin failed");
   }
-  Serial.print("Connect to http://espWebSock.local or http://");
-  Serial.println(WiFi.localIP());
 
+  // Start server
   server.on("/", handleRoot);
   server.onNotFound(handleNotFound);
-
   server.begin();
 
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
 }
+
 
 void loop()
 {
